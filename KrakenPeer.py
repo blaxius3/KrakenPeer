@@ -1,6 +1,8 @@
 import libtorrent as lt
 import time
 import sys
+import io
+import os
 from PyQt5 import QtWidgets, QtGui, QtCore
 
 
@@ -15,9 +17,6 @@ class TorrentWidgetItem(QtWidgets.QWidget):
 
         layout = QtWidgets.QHBoxLayout(self)
 
-        self.name_label = QtWidgets.QLabel(self.torrent['name'])
-        layout.addWidget(self.name_label)
-
         self.pause_button = QtWidgets.QPushButton('Pausar', self)
         self.pause_button.clicked.connect(self.pause_resume)
         layout.addWidget(self.pause_button)
@@ -25,9 +24,6 @@ class TorrentWidgetItem(QtWidgets.QWidget):
         self.remove_button = QtWidgets.QPushButton('Eliminar', self)
         self.remove_button.clicked.connect(self.remove)
         layout.addWidget(self.remove_button)
-
-    def update_status(self, status_text):
-        self.name_label.setText(status_text)
 
     def pause_resume(self):
         if self.torrent['handle'].status().paused:
@@ -40,7 +36,6 @@ class TorrentWidgetItem(QtWidgets.QWidget):
     def remove(self):
         self.torrent['handle'].pause()
         self.torrent['to_remove'] = True
-        self.setParent(None)
         self.session.remove_torrent(self.torrent['handle'])
         self.remove_torrent.emit(self.torrent)
 
@@ -56,31 +51,34 @@ class TorrentClient(QtWidgets.QMainWindow):
 
         self.torrents = []
 
-        self.setGeometry(300, 300, 400, 400)
+        self.setGeometry(300, 300, 800, 600)
         self.setWindowIcon(QtGui.QIcon('img/1.ico'))
         self.setWindowTitle('KrakenPeer')
 
         style = '''
             QWidget {
-                background-color: #222;
-                color: #fff;
+                background-color: #333333;
+                color: #ffffff;
+                font-family: "Arial";
             }
             QPushButton {
-                background-color: #444;
-                color: #fff;
+                background-color: #555555;
+                color: #ffffff;
+                border-radius: 5px;
             }
-            QListWidget {
-                background-color: #333;
-                color: #fff;
+            QPushButton:hover {
+                background-color: #777777;
             }
-            QListWidget::item:hover {
-                background-color: #555;
+            QTableWidget {
+                background-color: #444444;
+                color: #ffffff;
+                gridline-color: #555555;
             }
-            QListWidget::item:selected:hover {
-                background-color: #666;
-            }
-            QListWidget::item:selected:active {
-                background-color: #777;
+            QHeaderView::section {
+                background-color: #555555;
+                padding: 5px;
+                border: 1px solid #444444;
+                color: #ffffff;
             }
         '''
         self.setStyleSheet(style)
@@ -102,8 +100,10 @@ class TorrentClient(QtWidgets.QMainWindow):
         download_limit_action = QtWidgets.QAction('Límite de descarga', self)
         download_limit_action.triggered.connect(self.set_download_rate_limit_dialog)
         download_menu.addAction(download_limit_action)
-
-        self.torrent_list = QtWidgets.QListWidget(self)
+        self.torrent_list = QtWidgets.QTableWidget(0, 5, self)  # Cambie el número de columnas a 5
+        self.torrent_list.setHorizontalHeaderLabels(['Nombre', 'Progreso', 'Velocidad', 'Tamaño', 'Acciones'])  # Agregue 'Tamaño' a la lista de encabezados        self.torrent_list.verticalHeader().setVisible(False)
+        self.torrent_list.setShowGrid(True)
+        self.torrent_list.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)  # Ajustar columnas al redimensionar ventana
         self.setCentralWidget(self.torrent_list)
 
         self.timer = QtCore.QTimer(self)
@@ -111,8 +111,17 @@ class TorrentClient(QtWidgets.QMainWindow):
         self.timer.start(1000)
 
         self.download_path = '.'
-
         self.show()
+        self.setAcceptDrops(True)
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith('.torrent'):
+                self.add_torrent_from_file(path)
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -149,27 +158,57 @@ class TorrentClient(QtWidgets.QMainWindow):
                     continue
 
                 t['progress'] = int(status.progress * 100)
-                t['download_rate'] = status.download_rate / 1000
+                t['download_rate'] = status.download_rate / 1000 / 1000  # MB/s
 
                 if not t['item']:
                     t['item'] = TorrentWidgetItem(t, self.session)
-                    item_container = QtWidgets.QListWidgetItem()
-                    item_container.setSizeHint(t['item'].sizeHint())
-                    self.torrent_list.addItem(item_container)
-                    self.torrent_list.setItemWidget(item_container, t['item'])
+                    row_position = self.torrent_list.rowCount()
+                    self.torrent_list.insertRow(row_position)
+
+                    self.torrent_list.setItem(row_position, 0, QtWidgets.QTableWidgetItem(t['name']))
+
+                    progress_bar = QtWidgets.QProgressBar()
+                    progress_bar.setValue(t['progress'])
+                    progress_bar.setStyleSheet("""
+                    QProgressBar {
+                        border: 2px solid grey;
+                        border-radius: 5px;
+                        text-align: center;
+                    }
+
+                    QProgressBar::chunk {
+                        background-color: #008000;
+                    }
+                    """)
+                    self.torrent_list.setCellWidget(row_position, 1, progress_bar)
+
+                    self.torrent_list.setItem(row_position, 2, QtWidgets.QTableWidgetItem(f"{t['download_rate']:.2f} MB/s"))
+                    self.torrent_list.setCellWidget(row_position, 3, t['item'])
+
                     t['item'].remove_torrent.connect(self.remove_torrent)
-                    t['list_item'] = item_container
+                    t['list_item'] = row_position
+                    file_size_gb = handle.status().total_wanted / (1024 * 1024 * 1024)
+                    self.torrent_list.setItem(row_position, 3, QtWidgets.QTableWidgetItem(f"{file_size_gb:.2f} GB"))
+                    self.torrent_list.setCellWidget(row_position, 4, t['item'])  # Cambie el índice de columna aquí
 
-                t['item'].update_status(f"{t['name']} - {t['progress']}% - {t['download_rate']} KB/s")
 
+                else:
+                    self.torrent_list.item(t['list_item'], 0).setText(t['name'])
+                    progress_bar = self.torrent_list.cellWidget(t['list_item'], 1)
+                    progress_bar.setValue(t['progress'])
+                    file_size_gb = handle.status().total_wanted / (1024 * 1024 * 1024)
+                    self.torrent_list.setItem(t['list_item'], 3, QtWidgets.QTableWidgetItem(f"{file_size_gb:.2f} GB"))
+                    self.torrent_list.item(t['list_item'], 2).setText(f"{t['download_rate']:.2f} MB/s")
+                    self.torrent_list.item(t['list_item'], 2).setTextAlignment(QtCore.Qt.AlignCenter)  # Centrar el texto de la columna "Velocidad"
+                    self.torrent_list.item(t['list_item'], 3).setTextAlignment(QtCore.Qt.AlignCenter)  # Centrar el texto de la columna "Tamaño"
             else:
-                self.torrent_list.takeItem(self.torrent_list.row(t['list_item']))
+                self.torrent_list.removeRow(t['list_item'])
                 self.torrents.remove(t)
                 break
 
     def remove_torrent(self, torrent):
         if torrent in self.torrents:
-            self.torrent_list.takeItem(self.torrent_list.row(torrent['list_item']))
+            self.torrent_list.removeRow(torrent['list_item'])
             self.torrents.remove(torrent)
 
     def set_download_rate_limit(self, limit):
@@ -187,3 +226,4 @@ if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
     client = TorrentClient()
     sys.exit(app.exec_())
+
